@@ -1,0 +1,841 @@
+---
+title: "Ted PhIP-seq, using refined reference fasta"
+author: "Ryan Basom"
+date: "July 5, 2017"
+output: html_document
+---
+
+Run from rhino as user rbasom
+
+```{r bowtie alignments and count generation}
+options(stringsAsFactors = F)
+rootDir="/fh/fast/_SR/Genomics/user/rbasom/Users/2017/2017.06.02.tgobillo"
+setwd(rootDir)
+runDir="/shared/ngs/illumina/tgobillo/170526_M04866_0067_000000000-B9BNB"
+sampleDir<-paste0(runDir,"/Data/Intensities/BaseCalls")
+sampleSheet<-read.csv(paste0(runDir,"/SampleSheet.csv"), skip=21); print(nrow(sampleSheet)) #39
+sampleSheet$Sample_ID<-gsub(" ","", sampleSheet$Sample_ID)
+resultsDir<-paste0(rootDir,"/results")
+system(paste0("mkdir -p ", resultsDir))
+sbatchPath<-paste0(rootDir,"/sbatch/")
+system(paste0("mkdir -p ", sbatchPath))
+
+##Generate a batch job file for each sample
+for(i in 1:nrow(sampleSheet)){
+  cat("#!/bin/bash
+#SBATCH -N1 -n1 -t 0-2 --mail-type=END --mail-user=rbasom@fhcrc.org
+module load bowtie/1.1.1
+module load Python/2.7.12-foss-2016b-fh3
+PATH=/home/solexa/apps/samtools/samtools-1.3.1:/home/solexa/apps/anaconda3/bin:$PATH
+bowtieIndex=/shared/solexa/solexa/Genomes/genomes/PhIPseq/ted/ted
+scriptsPATH=/home/solexa/scripts/PhIPseq
+runDir=/shared/ngs/illumina/tgobillo/170526_M04866_0067_000000000-B9BNB",
+file=paste(sbatchPath, sampleSheet$Sample_ID[i],".sbatch",sep=""),sep="\n")
+cat(paste0("resultsDir=", resultsDir),
+    file=paste(sbatchPath, sampleSheet$Sample_ID[i],".sbatch",sep=""),sep="\n", append=TRUE)  
+cat(paste0("sampleName=", sampleSheet$Sample_ID[i]), 
+      file=paste(sbatchPath, sampleSheet$Sample_ID[i],".sbatch",sep=""),sep="\n", append=TRUE)
+cat(paste0("cd ", sampleDir), 
+      file=paste(sbatchPath, sampleSheet$Sample_ID[i],".sbatch",sep=""),sep="\n", append=TRUE)
+cat(paste0("cutadapt -g TCCAGTCAGGTGTGATGCTCGGGGATCCGAATTCTACGCTGAGT -o $resultsDir/$sampleName.trimmed.fastq.gz ", sampleSheet$Sample_Name[i],"_*_R1*.fastq.gz"), file=paste(sbatchPath, sampleSheet$Sample_ID[i],".sbatch",sep=""),sep="\n", append=TRUE)
+cat("cd $resultsDir", file=paste(sbatchPath, sampleSheet$Sample_ID[i],".sbatch",sep=""),sep="\n", append=TRUE)
+cat(paste0("zcat -dc ", sampleSheet$Sample_ID[i],".trimmed.fastq.gz | bowtie -n 3 -l 30 -e 1000 --tryhard --nomaqround --norc --best --sam --quiet $bowtieIndex - | samtools view -u - | samtools sort - > $resultsDir/$sampleName.bam"), file=paste(sbatchPath, sampleSheet$Sample_ID[i],".sbatch",sep=""),sep="\n", append=TRUE)
+cat("samtools index $sampleName.bam
+samtools idxstats $sampleName.bam | cut -f 1,3 | sed -e \'/^\\*\\t/d\' -e \"1 i id\\t$sampleName\" | tr \"\\\\t\" \",\" >$sampleName.count.csv
+gzip $sampleName.count.csv
+exit 0",
+file=paste(sbatchPath, sampleSheet$Sample_ID[i],".sbatch",sep=""),sep="\n", append=TRUE)
+}
+
+setwd(sbatchPath)
+system("for s in *.sbatch;do sbatch $s; done")
+
+```
+
+Look at correlation between Input samples, and possibly combine
+
+```{r Input sample correlation}
+library(genomicsCoreTools)
+library(edgeR)
+options(stringsAsFactors=F)
+setwd("results/counts")
+sampleSheet<-read.csv(paste0("../../SampleSheet.csv"), skip=21); print(nrow(sampleSheet)) #39
+sampleSheet$Sample_ID<-gsub(" ","", sampleSheet$Sample_ID)
+samples<-unique(sub("_[0-9]$","",sampleSheet$Sample_ID))
+sampleSheet<-data.frame("SampleName"=samples)
+
+zz<-gzfile("Input_1.count.csv.gz", 'rt'); d1<-read.csv(zz, check.names=F)
+zz<-gzfile("Input_2.count.csv.gz", 'rt'); d2<-read.csv(zz, check.names=F)
+zz<-gzfile("Input_3.count.csv.gz", 'rt'); d3<-read.csv(zz, check.names=F)
+m<-merge(d1,d2,by="id")
+m<-merge(m,d3,by="id")
+m<-data.frame(m[2:ncol(m)], row.names=m$id)
+apply(m,2,sum)
+# Input_1 Input_2 Input_3 
+#  445477  396121  230453
+
+Sums<-apply(m,2,sum)
+hasCounts<-function(x){
+  length(x[x > 0])
+}
+OligosDetected<-apply(m,2,hasCounts)
+# Input_1 Input_2 Input_3 
+#    4388    4380    4337 
+between10and100<-function(x){
+  length(x[x > 10 &  x < 100])
+}
+lessThan100gt10<-apply(m,2,between10and100)
+# Input_1 Input_2 Input_3 
+#    2399    2542    2830 
+mNorm<-cpm(m, log=T)
+png(file="2017.07.05.InputSampleCorrelationMatrix.png")
+correlationMatrix(mNorm)
+dev.off()
+
+#combine Input samples and call it "Input"
+m$Input<-apply(m,1,sum)
+z<-data.frame(row.names(m),m[,4]); names(z)<-c("id","Input")
+d1$Index<-1:nrow(d1)
+test<-merge(z,d1,by="id"); nrow(test)
+test<-test[order(test$Index),]
+test<-test[,c(1,2)]
+write.table(test, file="Input.count.csv", sep=",", quote=F, row.names=F)
+
+```
+
+Summarize counts
+
+```{r summarize counts}
+options(stringsAsFactors = F)
+fnames<-dir(pattern="count.csv.gz")
+zz<-gzfile(fnames[1], 'rt'); d<-read.csv(zz, check.names=F)
+for(f in 2:length(fnames)){
+  zz<-gzfile(fnames[f], 'rt'); x<-read.csv(zz, check.names=F); print(nrow(x))
+  d<-merge(d,x,by="id"); print(nrow(d))
+}
+
+#add annotation
+m<-read.delim("../../2017.07.05.MetaData.txt", check.names=F)
+m<-merge(m,d,by="id")
+write.table(m,file="2017.07.05.annotatedCounts.txt",sep="\t",quote=F,row.names=F)
+
+#summaryStats
+d<-data.frame(d[2:ncol(d)], row.names=d$id, check.names=F)
+
+Sums<-apply(d,2,sum)
+hasCounts<-function(x){
+  length(x[x > 0])
+}
+
+OligosDetected<-apply(d,2,hasCounts)
+#Just curious what % of the clones are not detected? and what % of the clones lie between 10 and 100 reads
+between10and100<-function(x){
+  length(x[x > 10 &  x < 100])
+}
+lessThan100gt10<-apply(d,2,between10and100)
+z<-cbind(OligosDetected,lessThan100gt10)
+z<-data.frame(z)
+z$PercentDetected<-100*round(OligosDetected/4473,4)
+z$PercentBetween10and100<-100*round(lessThan100gt10/4473,4)
+names(z)[1:2]<-c("Detected","Beetween10and100")
+z<-data.frame(row.names(z),z); names(z)[1]<-"Sample"
+write.table(z,file="2017.07.05.tgobilloDetectionSummary.txt",sep="\t",quote=F,row.names=F)
+
+```
+
+
+
+```{r generate p-values from counts & virus scores}
+options(stringsAsFactors = F)
+rootDir="/fh/fast/_SR/Genomics/user/rbasom/Users/2017/2017.06.02.tgobillo"
+setwd(rootDir)
+runDir="/shared/ngs/illumina/tgobillo/170526_M04866_0067_000000000-B9BNB"
+sampleDir<-paste0(runDir,"/Data/Intensities/BaseCalls")
+sampleSheet<-read.csv(paste0(runDir,"/SampleSheet.csv"), skip=21); print(nrow(sampleSheet)) #39
+#sampleSheet$Sample_ID<-gsub(" ","", sampleSheet$Sample_ID)
+
+#sampleSheet<-read.csv("SampleSheet.csv", skip=21); print(nrow(sampleSheet)) #39
+sampleSheet$Sample_ID<-gsub(" ","", sampleSheet$Sample_ID)
+samples<-unique(sub("_[0-9]$","",sampleSheet$Sample_ID))
+sampleSheet<-data.frame("SampleName"=samples)
+
+sbatchPath<-"/fh/fast/_SR/Genomics/user/rbasom/Users/2017/2017.06.02.tgobillo/2017.07.05.zipvalSbatch/"
+system(paste0("mkdir ", sbatchPath))
+resultsDir<-"/fh/fast/_SR/Genomics/user/rbasom/Users/2017/2017.06.02.tgobillo/results/counts"
+
+for(i in 1:nrow(sampleSheet)){
+  cat("#!/bin/bash
+#SBATCH -N1 -n1 -t 0-2 --mail-type=END --mail-user=rbasom@fhcrc.org
+PATH=/home/solexa/apps/samtools/samtools-1.3.1:/home/solexa/apps/anaconda3/bin:$PATH
+scriptsPATH=/home/solexa/scripts/PhIPseq
+runDir=/fh/fast/_SR/Genomics/user/rbasom/Users/2017/2017.06.02.tgobillo
+refFilesDir=$runDir/results/counts
+inputCounts=$refFilesDir/Input.count.csv.gz",
+file=paste(sbatchPath, sampleSheet$SampleName[i],".sbatch",sep=""),sep="\n")
+cat(paste0("resultsDir=", resultsDir),
+    file=paste(sbatchPath, sampleSheet$SampleName[i],".sbatch",sep=""),sep="\n", append=TRUE)  
+
+cat(paste0("sampleName=", sampleSheet$SampleName[i]), 
+      file=paste(sbatchPath, sampleSheet$SampleName[i],".sbatch",sep=""),sep="\n", append=TRUE)
+cat(paste0("cd ", resultsDir),
+      file=paste(sbatchPath, sampleSheet$SampleName[i],".sbatch",sep=""),sep="\n", append=TRUE)
+
+cat("mkdir -p $sampleName.log/rep1
+mkdir -p $sampleName.log/rep2
+mkdir -p $sampleName.log/rep3
+python /home/solexa/scripts/PhIPseq/calc_zipval.py $sampleName\\_1.count.csv.gz $inputCounts $sampleName.log/rep1 > $sampleName.rep1.zipval.csv
+python /home/solexa/scripts/PhIPseq/calc_zipval.py $sampleName\\_2.count.csv.gz $inputCounts $sampleName.log/rep2 > $sampleName.rep2.zipval.csv
+python /home/solexa/scripts/PhIPseq/calc_zipval.py $sampleName\\_3.count.csv.gz $inputCounts $sampleName.log/rep3 > $sampleName.rep3.zipval.csv
+gzip $sampleName.rep1.zipval.csv
+gzip $sampleName.rep2.zipval.csv
+gzip $sampleName.rep3.zipval.csv
+gzip $sampleName.zihit.csv",
+file=paste(sbatchPath, sampleSheet$SampleName[i],".sbatch",sep=""),sep="\n", append=TRUE)
+}
+
+setwd(sbatchPath)
+system("for s in *.sbatch; do sbatch $s; done")
+
+```
+
+Calculate reproducibility threshold
+Needs to be run on work desktop machine due to rgeos dependency
+
+```{r calculate reproducibility threshold}
+library(sp)
+library(rgeos)
+options(stringsAsFactors = F)
+setwd("/media/fh/Users/2017/2017.06.02.tgobillo")
+
+#rolling_summary function - more details below
+rolling_summary <- function(DF, time_col, fun, window_size, step_size, min_window=min(DF[, time_col])) {
+    times <- DF[, time_col]
+    window_starts <- seq(from=min_window, to=max(times), by=step_size)
+    window_rows <- lapply(window_starts, function(x) { which(times>=x & times<x+window_size) })
+    window_summaries <- sapply(window_rows, function(w_r) fun(DF[w_r, ]))
+    data.frame(start_time=window_starts, end_time=window_starts+window_size, summary=window_summaries)
+}
+
+
+sampleSheet<-read.csv("SampleSheet.csv", skip=21); print(nrow(sampleSheet)) #39
+sampleSheet$Sample_ID<-gsub(" ","", sampleSheet$Sample_ID)
+samples<-unique(sub("_[0-9]$","",sampleSheet$Sample_ID))
+samples<-samples[!samples %in% c("Beads-only","Input")]
+
+Thresholds<-data.frame("Sample"=samples, "Threshold"=0)
+
+
+for(sampleName in samples){
+  zz<-gzfile(paste0("results/counts/",sampleName,".rep1.zipval.csv.gz"), 'rt'); r1<-read.csv(zz)
+  zz<-gzfile(paste0("results/counts/",sampleName,".rep2.zipval.csv.gz"), 'rt'); r2<-read.csv(zz)
+  m<-merge(r1,r2,by="id")
+  x<-m
+  #find NAs and discard
+  nas<-x[is.na(x[,2]) | is.na(x[,3]),]; print(nrow(nas)) #4
+  print(nas)
+  #get rid of rows with 0s in order to faciliate log10 transformation
+  zeros<-x[x[,2] == 0 | x[,3] ==0,]; print(nrow(zeros)) #137
+  zeros<-zeros[!is.na(zeros$id),]; print(nrow(zeros)) #133
+  x<-x[!x[,1] %in% nas[,1],]; print(nrow(x))
+  x<-x[!x[,1] %in% zeros[,1],]; print(nrow(x))
+  x[,2:3]<-log10(x[,2:3])
+  x<-x[order(x[,2], x[,3]),]
+  
+  means<-rolling_summary(DF=x,
+                  time_col=names(x)[2],
+                  #fun=function(DF) mean(DF[,3], na.rm=T),
+                  fun=function(DF) median(DF[,3], na.rm=T),
+                  window_size=0.05,
+                  step_size=0.05,
+                  min_window=-2)
+  names(means)[3]<-"Mean"
+  
+  sds<-rolling_summary(DF=x,
+                  time_col=names(x)[2],
+                  #fun=function(DF) sd(DF[,3], na.rm=T),
+                  fun=function(DF) mad(DF[,3], na.rm=T),
+                  window_size=0.05,
+                  step_size=0.05,
+                  min_window=-2)
+  names(sds)[3]<-"SD"
+  
+  z<-merge(means,sds, by="start_time")
+  # thresholdRow<-which(z$Mean > z$SD)[1]
+  # meanAtThreshold<-z$Mean[thresholdRow]
+  # #convert meanAtThreshold to -log10(p-value)
+  # negLog10p<-10^meanAtThreshold
+  # pVal<-10^-negLog10p
+  
+  # Find the intersection for each segment.
+  z<-z[!is.na(z$SD),]
+  x1<-z$start_time; x2<-z$start_time
+  y1<-z$Mean; y2<-z$SD
+  l1 <- Line(matrix(c(x1, y1), nc = 2, byrow = F))
+  l2 <- Line(matrix(c(x2, y2), nc = 2, byrow = F))
+  ll1 <- Lines(list(l1), ID = "1")
+  ll2 <- Lines(list(l2), ID = "1")
+  sl1 <- SpatialLines(list(ll1), proj4string = CRS("+init=epsg:4269"))
+  sl2 <- SpatialLines(list(ll2), proj4string = CRS("+init=epsg:4269"))
+  int.pts <- gIntersection(sl1, sl2, byid = TRUE)
+  
+  
+  # Plot line data and points of intersection
+  png(file=paste0("2017.07.05.",sampleName,"_rep1_rep2_MedianMAD.png"))
+  plot(means$start_time, means$Mean, xlab="log(-log10(enrichment P value)", ylab="", col="blue", pch=16, main=sampleName, ylim=c(-1.5,1.5))
+  points(sds$start_time, sds$SD, col="green", pch=17)
+  if(length(int.pts) > 0){
+    int.coords <- int.pts@coords
+    lines(x1, y1, type = "l", col="blue")
+    lines(x2, y2, type = "l", col = "green")
+    points(int.coords[1,1], int.coords[1,2], pch = 20, col = "red", cex=2)
+    
+  }
+  dev.off()
+  #add intersection value to thresholds data.frame
+  if(length(int.pts) == 0){
+    Thresholds$Threshold[Thresholds$Sample == sampleName]<-"NA"
+  }
+  if(length(int.pts) > 0){
+    Thresholds$Threshold[Thresholds$Sample == sampleName]<-int.coords[1,1]
+  }
+}
+
+Thresholds$Threshold<-as.numeric(Thresholds$Threshold)
+Thresholds$zipval<-10^Thresholds$Threshold
+Thresholds$pval<-10^-Thresholds$zipval
+print(Thresholds)
+#     Sample Threshold   zipval         pval
+# 1  447-52D 0.6701479 4.678944 2.094382e-05
+# 2      4G2 0.5097857 3.234340 5.829886e-04
+# 3     DV63 0.4354092 2.725268 1.882488e-03
+# 4    VRC01 0.5809699 3.810394 1.547412e-04
+# 5    ZV-48 0.5430120 3.491499 3.224784e-04
+# 6    QA013 0.7731899 5.931846 1.169914e-06
+# 7    240-D 0.6373155 4.338259 4.589242e-05
+# 8      NS1 0.5980091 3.962863 1.089273e-04
+# 9   PGT145 0.4752249 2.986929 1.030555e-03
+# 10     Flu 0.5649325 3.672252 2.126904e-04
+
+#look at using median and mad
+#Go with this
+#     Sample Threshold   zipval         pval
+# 1  447-52D 0.6346142 4.311360 4.882480e-05
+# 2      4G2 0.5026848 3.181887 6.578286e-04
+# 3     DV63 0.4248027 2.659517 2.190197e-03
+# 4    VRC01 0.5128108 3.256948 5.534164e-04
+# 5    ZV-48 0.5435522 3.495845 3.192678e-04
+# 6    QA013 0.4090613 2.564846 2.723667e-03
+# 7    240-D 0.6357503 4.322652 4.757162e-05
+# 8      NS1 0.5855054 3.850396 1.411250e-04
+# 9   PGT145 0.4546047 2.848424 1.417672e-03
+# 10     Flu 0.4896451 3.087771 8.170135e-04
+
+
+
+png(file="2017.07.05.medianMADthresholdHistogram.png")
+hist(Thresholds$zipval, col="blue", xlab="-log10(p-value)", breaks=c(0,1,2,3,4,5,6), ylab="Samples (n=10)", main="")
+dev.off()
+median(Thresholds$zipval, na.rm=T) #3.219418
+mean(Thresholds$zipval, na.rm=T) #3.357965
+
+#use threshold of 3.2
+
+
+```
+
+generate batch jobs to call hits
+run from rhino
+
+```{r generate batch jobs to call hits}
+options(stringsAsFactors = F)
+rootDir="/fh/fast/_SR/Genomics/user/rbasom/Users/2017/2017.06.02.tgobillo"
+setwd(rootDir)
+runDir="/shared/ngs/illumina/tgobillo/170526_M04866_0067_000000000-B9BNB"
+sampleDir<-paste0(runDir,"/Data/Intensities/BaseCalls")
+sampleSheet<-read.csv(paste0(runDir,"/SampleSheet.csv"), skip=21); print(nrow(sampleSheet)) #39
+#sampleSheet$Sample_ID<-gsub(" ","", sampleSheet$Sample_ID)
+
+#sampleSheet<-read.csv("SampleSheet.csv", skip=21); print(nrow(sampleSheet)) #39
+sampleSheet$Sample_ID<-gsub(" ","", sampleSheet$Sample_ID)
+samples<-unique(sub("_[0-9]$","",sampleSheet$Sample_ID))
+sampleSheet<-data.frame("SampleName"=samples)
+
+sbatchPath<-"/fh/fast/_SR/Genomics/user/rbasom/Users/2017/2017.06.02.tgobillo/2017.07.05.callHitsSbatch/"
+system(paste0("mkdir ", sbatchPath))
+resultsDir<-"/fh/fast/_SR/Genomics/user/rbasom/Users/2017/2017.06.02.tgobillo/results/counts"
+
+for(i in 1:nrow(sampleSheet)){
+  cat("#!/bin/bash
+#SBATCH -N1 -n1 -t 0-2 --mail-type=END --mail-user=rbasom@fhcrc.org
+PATH=/home/solexa/apps/samtools/samtools-1.3.1:/home/solexa/apps/anaconda3/bin:$PATH
+scriptsPATH=/home/solexa/scripts/PhIPseq
+threshold=3.2",
+file=paste(sbatchPath, sampleSheet$SampleName[i],".sbatch",sep=""),sep="\n")
+cat(paste0("resultsDir=", resultsDir),
+    file=paste(sbatchPath, sampleSheet$SampleName[i],".sbatch",sep=""),sep="\n", append=TRUE)  
+
+cat(paste0("sampleName=", sampleSheet$SampleName[i]), 
+      file=paste(sbatchPath, sampleSheet$SampleName[i],".sbatch",sep=""),sep="\n", append=TRUE)
+
+cat("cd $resultsDir
+python /home/solexa/scripts/PhIPseq/call_hits.py $sampleName.rep1.zipval.csv.gz $sampleName.rep2.zipval.csv.gz $sampleName.log $threshold  > $sampleName.zihit.csv
+gzip $sampleName.zihit.csv
+exit 0",
+file=paste(sbatchPath, sampleSheet$SampleName[i],".sbatch",sep=""),sep="\n", append=TRUE)
+}
+
+setwd(sbatchPath)
+system("for s in *.sbatch;do sbatch $s; done")
+
+```
+
+Assess hits, which were called using the -log10(p-value) threshold determined from the
+
+```{r}
+options(stringsAsFactors=F)
+rootDir="/fh/fast/_SR/Genomics/user/rbasom/Users/2017/2017.06.02.tgobillo"
+setwd(rootDir)
+sampleSheet<-read.csv(paste0(rootDir,"/SampleSheet.csv"), skip=21); print(nrow(sampleSheet)) #39
+sampleSheet$Sample_ID<-gsub(" ","", sampleSheet$Sample_ID)
+samples<-unique(sub("_[0-9]$","",sampleSheet$Sample_ID))
+sampleSheet<-data.frame("SampleName"=samples)
+resultsDir<-"/fh/fast/_SR/Genomics/user/rbasom/Users/2017/2017.06.02.tgobillo/results/counts"
+
+# sampleSheet<-sampleSheet[!sampleSheet$SampleName %in% c("Input"),]
+
+sampleName<-sampleSheet$SampleName[1]
+zz<-gzfile(paste0("results/counts/",sampleName,".zihit.csv.gz"), 'rt'); d<-read.csv(zz, check.names=F)
+
+for(i in 2:length(sampleSheet$SampleName)){
+  zz<-gzfile(paste0("results/counts/",sampleSheet$SampleName[i],".zihit.csv.gz"), 'rt'); x<-read.csv(zz, check.names=F)
+  d<-merge(d,x,by="id")
+}
+
+#add the five additional beads only comparisons to results
+b1<-read.csv("results/counts/Beads-only.1.4.zihit.csv"); names(b1)[2]<-"Beads.only_1_4"
+b2<-read.csv("results/counts/Beads-only.1.3.zihit.csv"); names(b2)[2]<-"Beads.only_1_3"
+b3<-read.csv("results/counts/Beads-only.3.4.zihit.csv"); names(b3)[2]<-"Beads.only_3_4"
+b4<-read.csv("results/counts/Beads-only.4.5.zihit.csv"); names(b4)[2]<-"Beads.only_4_5"
+b5<-read.csv("results/counts/Beads-only.5.6.zihit.csv"); names(b5)[2]<-"Beads.only_5_6"
+b<-merge(b1,b2,by="id"); b<-merge(b,b3, by="id"); b<-merge(b,b4,by="id"); b<-merge(b,b5,by="id")
+d<-merge(d,b,by="id")
+
+
+for(i in 2:ncol(d)){
+  print(names(d)[i])
+  print(table(d[,i]))
+}
+
+anno<-read.delim("2017.07.05.MetaData.txt", check.names=F)
+
+for(i in 2:ncol(d)){
+  x<-d[,c(1,i)]
+  x<-x$id[x[,2] == "True"]
+  resultName<-paste0("2017.07.05.",names(d)[i],".hits.txt")
+  x<-anno[anno$id %in% x,]
+  write.table(x,file=resultName,sep="\t",quote=F,row.names=F)
+}
+
+d2<-merge(anno,d,by="id")
+d2<-d2[,c(1:7,9:16,8,17:ncol(d2))]
+names(d2)[16]<-"Beads-only_1_2"
+write.table(d2,file="2017.07.05.hits.txt",sep="\t",quote=F,row.names=F)
+
+#summarize number of hits by epitope
+x<-d2
+x<-data.frame(x[5:ncol(x)], row.names=x$id, check.names=F)
+x[x == "True"]<-1
+x[x == "False"]<-0
+for(i in 1:ncol(x)){
+  x[,i]<-as.numeric(x[,i])
+}
+x$AllSums<-apply(x,1,sum)
+x$BeadOnlySums<-apply(x[12:17],1,sum)
+x<-x[order(x$AllSums, x$BeadOnlySums, decreasing = T),]
+x<-data.frame(row.names(x),x, check.names=F); names(x)[1]<-"id"
+x<-merge(anno,x,by="id")
+write.table(x,file="2017.07.05.hitsTally.txt",sep="\t",quote=F,row.names=F)
+
+```
+
+
+
+
+
+
+
+
+#####################################################################
+2017.06.13
+
+#Xu et al
+Briefly,
+we made scatter plots of the log 10 of the –log 10 (P
+values) and used a sliding window of width 0.005
+from 0 to 2 across the axis of one replicate. For all
+the clones that fell within each window, we cal-
+culated the median and median absolute devia-
+tion of the log 10 of the –log 10 (P values) in the
+other replicate and plotted it against the window
+location (fig. S2). We called the threshold for re-
+producibility the first window in which the me-
+dian was greater than the median absolute
+deviation. We found that the distribution of the
+threshold –log 10 (P value) was centered around a
+mean of ~2.3 (fig. S12). So we called a peptide a
+hit if the –log 10 (P value) was at least 2.3 in both
+replicates. We eliminated the 593 hits that came
+up in at least 3 of the 22 immunoprecipitations
+with beads alone (negative control for nonspecific
+binding). We also filtered out any peptides that
+were not enriched in at least two of the samples
+
+
+#Larman et al explains this differently!
+PhIP-Seq characterization of autoantibodies from patients with
+multiple sclerosis, type 1 diabetes and rheumatoid arthritis
+Subsequent computational analysis was performed in MATLAB software (MathWorks). Reproducibility between each replica pair was assessed as follows. Scatter plots of the log10 of the −log10 P-values were generated, and a sliding window of width 0.05 was moved in steps from −2 to 3 across the x-axis. The mean and standard deviation of the values within this window were calculated at each step and plotted as a function of −log10 P-values (see Supplementary Fig. 1A for example). For each replica pair, we determined the −log10 P-value at which the mean was equal to the standard deviation. A histogram plot of these values are given as Supplementary Fig. 1B. Based on this data, we chose a −log10 P-value of 4 to be our cutoff for considering a peptide to be significantly enriched in an IP experiment. 
+
+
+```{r}
+library(sp)
+library(rgeos)
+options(stringsAsFactors = F)
+
+#rolling_summary function - more details below
+rolling_summary <- function(DF, time_col, fun, window_size, step_size, min_window=min(DF[, time_col])) {
+    times <- DF[, time_col]
+    window_starts <- seq(from=min_window, to=max(times), by=step_size)
+    window_rows <- lapply(window_starts, function(x) { which(times>=x & times<x+window_size) })
+    window_summaries <- sapply(window_rows, function(w_r) fun(DF[w_r, ]))
+    data.frame(start_time=window_starts, end_time=window_starts+window_size, summary=window_summaries)
+}
+
+
+sampleSheet<-read.csv("SampleSheet.csv", skip=21); print(nrow(sampleSheet)) #39
+sampleSheet$Sample_ID<-gsub(" ","", sampleSheet$Sample_ID)
+samples<-unique(sub("_[0-9]$","",sampleSheet$Sample_ID))
+samples<-samples[!samples %in% c("Beads-only","Input")]
+
+Thresholds<-data.frame("Sample"=samples, "Threshold"=0)
+
+#test using ZV-48
+#sampleName<-"ZV-48"
+for(sampleName in samples){
+  # r1<-read.csv(paste0("results/counts/",sampleName,"_1.zipval.csv"))
+# r2<-read.csv(paste0("results/counts/",sampleName,"_2.zipval.csv"))
+zz<-gzfile(paste0("results/counts/",sampleName,".rep1.zipval.csv.gz"), 'rt'); r1<-read.csv(zz)
+zz<-gzfile(paste0("results/counts/",sampleName,".rep2.zipval.csv.gz"), 'rt'); r2<-read.csv(zz)
+m<-merge(r1,r2,by="id")
+#plot(log10(m[,2]),log10(m[,3]))
+x<-m
+#x<-x[x[,2] > 0,]; print(nrow(x))
+#get rid of rows with 0s in order to faciliate log10 transformation
+zeros<-x[x[,2] == 0 | x[,3] ==0,]; print(nrow(zeros)) #31
+x<-x[!x[,1] %in% zeros[,1],]; print(nrow(x)) #5697
+x[,2:3]<-log10(x[,2:3])
+x<-x[order(x[,2], x[,3]),]
+
+means<-rolling_summary(DF=x,
+                time_col=names(x)[2],
+                fun=function(DF) mean(DF[,3], na.rm=T),
+                window_size=0.05,
+                step_size=0.05,
+                min_window=-2)
+names(means)[3]<-"Mean"
+
+sds<-rolling_summary(DF=x,
+                time_col=names(x)[2],
+                fun=function(DF) sd(DF[,3], na.rm=T),
+                window_size=0.05,
+                step_size=0.05,
+                min_window=-2)
+names(sds)[3]<-"SD"
+
+z<-merge(means,sds, by="start_time")
+# thresholdRow<-which(z$Mean > z$SD)[1]
+# meanAtThreshold<-z$Mean[thresholdRow]
+# #convert meanAtThreshold to -log10(p-value)
+# negLog10p<-10^meanAtThreshold
+# pVal<-10^-negLog10p
+
+# Find the intersection for each segment.
+z<-z[!is.na(z$SD),]
+x1<-z$start_time; x2<-z$start_time
+y1<-z$Mean; y2<-z$SD
+l1 <- Line(matrix(c(x1, y1), nc = 2, byrow = F))
+l2 <- Line(matrix(c(x2, y2), nc = 2, byrow = F))
+ll1 <- Lines(list(l1), ID = "1")
+ll2 <- Lines(list(l2), ID = "1")
+sl1 <- SpatialLines(list(ll1), proj4string = CRS("+init=epsg:4269"))
+sl2 <- SpatialLines(list(ll2), proj4string = CRS("+init=epsg:4269"))
+int.pts <- gIntersection(sl1, sl2, byid = TRUE)
+
+
+# Plot line data and points of intersection
+png(file=paste0("2017.06.21.",sampleName,"_rep1_rep2_MeanSD.png"))
+plot(means$start_time, means$Mean, xlab="log(-log10(enrichment P value)", ylab="", col="blue", pch=16, main=sampleName, ylim=c(-1.5,1.5))
+points(sds$start_time, sds$SD, col="green", pch=17)
+if(length(int.pts) > 0){
+  int.coords <- int.pts@coords
+  lines(x1, y1, type = "l", col="blue")
+  lines(x2, y2, type = "l", col = "green")
+  points(int.coords[1,1], int.coords[1,2], pch = 20, col = "red", cex=2)
+  
+}
+dev.off()
+
+#add intersection value to thresholds data.frame
+if(length(int.pts) == 0){
+  Thresholds$Threshold[Thresholds$Sample == sampleName]<-"NA"
+}
+if(length(int.pts) > 0){
+  Thresholds$Threshold[Thresholds$Sample == sampleName]<-int.coords[1,1]
+}
+
+}
+
+Thresholds$Threshold<-as.numeric(Thresholds$Threshold)
+Thresholds$zipval<-10^Thresholds$Threshold
+Thresholds$pval<-10^-Thresholds$zipval
+print(Thresholds)
+#    Sample Threshold   zipval         pval
+# 1 447-52D 0.4369013 2.734647 1.842267e-03
+# 2     4G2 0.5497424 3.546030 2.844265e-04
+# 3    DV63 0.4797285 3.018064 9.592586e-04
+# 5   ZV-48 0.7337113 5.416407 3.833477e-06
+# 6   QA013 0.4785562 3.009929 9.773980e-04
+# 7   240-D 0.5814340 3.814468 1.532965e-04
+# 8     NS1 0.6480589 4.446916 3.573420e-05
+
+png(file="2017.06.21.meanSDthresholdHistogram.png")
+hist(Thresholds$zipval, col="blue", xlab="-log10(p-value)", breaks=c(0,1,2,3,4,5,6), ylab="Samples (n=7)", main="")
+dev.off()
+median(Thresholds$zipval, na.rm=T) #3.54603
+mean(Thresholds$zipval, na.rm=T) #3.712352
+
+#go with a threshold of 3, which is equal to a p-value of 0.001
+# go with the median, a threshold of 3.5, which is equal to a p-value of 0.0003
+
+
+
+
+
+##find intersection between two lines (last solution on page)
+#https://stackoverflow.com/questions/20519431/finding-point-of-intersection-in-r
+library(sp)
+library(rgeos)
+# dummy x data
+x1 = rnorm(100,0,1)
+x2 = rnorm(100,1,1)
+
+#dummy y data 
+y1 <- seq(1, 100, 1)
+y2 <- seq(1, 100, 1) 
+
+# convert to a sp object (spatial lines)
+l1 <- Line(matrix(c(x1, y1), nc = 2, byrow = F))
+l2 <- Line(matrix(c(x2, y2), nc = 2, byrow = F))
+ll1 <- Lines(list(l1), ID = "1")
+ll2 <- Lines(list(l2), ID = "1")
+sl1 <- SpatialLines(list(ll1), proj4string = CRS("+init=epsg:4269"))
+sl2 <- SpatialLines(list(ll2), proj4string = CRS("+init=epsg:4269"))
+
+# Calculate locations where spatial lines intersect
+int.pts <- gIntersection(sl1, sl2, byid = TRUE)
+int.coords <- int.pts@coords
+
+# Plot line data and points of intersection
+plot(x1, y1, type = "l")
+lines(x2, y2, type = "l", col = "red")
+points(int.coords[,1], int.coords[,2], pch = 20, col = "blue")
+#end example
+
+
+
+#https://stackoverflow.com/questions/24745402/r-rolling-window-function-with-adjustable-window-and-step-size-for-irregularly
+##start example
+rolling_summary <- function(DF, time_col, fun, window_size, step_size, min_window=min(DF[, time_col])) {
+    # time_col is name of time column
+    # fun is function to apply to the subsetted data frames
+    # min_window is the start time of the earliest window
+
+    times <- DF[, time_col]
+
+    # window_starts is a vector of the windows' minimum times
+    window_starts <- seq(from=min_window, to=max(times), by=step_size)
+
+    # The i-th element of window_rows is a vector that tells us the row numbers of
+    # the data-frame rows that are present in window i 
+    window_rows <- lapply(window_starts, function(x) { which(times>=x & times<x+window_size) })
+
+    window_summaries <- sapply(window_rows, function(w_r) fun(DF[w_r, ]))
+    data.frame(start_time=window_starts, end_time=window_starts+window_size, summary=window_summaries)
+}
+
+rolling_summary(DF=dat,
+                time_col="time",
+                fun=function(DF) mean(DF$measure),
+                window_size=5,
+                step_size=2.5,
+                min_window=-2.5)
+##end example
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r previous example}
+for(i in 1:nrow(sampleSheet)){
+  cat("#!/bin/bash
+#SBATCH -N1 -n1 -t 0-2 --mail-type=END --mail-user=rbasom@fhcrc.org
+module load bowtie/1.1.1
+PATH=/home/solexa/apps/samtools/samtools-1.3.1:/home/solexa/apps/anaconda3/bin:$PATH
+bowtieIndex=/shared/solexa/solexa/Genomes/genomes/PhIPseq/ted/ted
+scriptsPATH=/home/solexa/scripts/PhIPseq
+runDir=/shared/ngs/illumina/tgobillo/170526_M04866_0067_000000000-B9BNB
+refFilesDir=$runDir/VirScanPipelineTransfer
+mkdir -p $resultsDir
+inputCounts=$refFilesDir/vir2.160114.count.csv.gz
+threshold=2.3
+metaData=$runDir/SABES/VIR2.csv.gz
+groupingLevel=Species
+epitopeLength=7
+nhitsBeads=$refFilesDir/vir2.nhits.beads.csv.gz
+nhitsSamples=$refFilesDir/vir2.nhits.samps.csv.gz",
+file=paste(sbatchPath, sampleSheet$SampleName[i],".sbatch",sep=""),sep="\n")
+cat(paste0("resultsDir=", resultsDir),
+    file=paste(sbatchPath, sampleSheet$SampleName[i],".sbatch",sep=""),sep="\n", append=TRUE)  
+
+cat(paste0("sampleName=", sampleSheet$SampleName[i]), 
+      file=paste(sbatchPath, sampleSheet$SampleName[i],".sbatch",sep=""),sep="\n", append=TRUE)
+cat(paste0("cd ", sampleDir), 
+      file=paste(sbatchPath, sampleSheet$SampleName[i],".sbatch",sep=""),sep="\n", append=TRUE)
+rep1<-dir(sampleDir, pattern=Rep1$Sample[i])
+rep2<-dir(sampleDir, pattern=Rep2$Sample[i])
+cat(paste0("rep1=", rep1), 
+      file=paste(sbatchPath, sampleSheet$SampleName[i],".sbatch",sep=""),sep="\n", append=TRUE)
+cat(paste0("rep2=", rep2), 
+      file=paste(sbatchPath, sampleSheet$SampleName[i],".sbatch",sep=""),sep="\n", append=TRUE)
+
+cat("bzip2 -dc $rep1 | bowtie -n 3 -l 30 -e 1000 --tryhard --nomaqround --norc --best --sam --quiet $bowtieIndex - | samtools view -u - | samtools sort - > $resultsDir/$sampleName.rep1.bam
+bzip2 -dc $rep2 | bowtie -n 3 -l 30 -e 1000 --tryhard --nomaqround --norc --best --sam --quiet $bowtieIndex - | samtools view -u - | samtools sort - > $resultsDir/$sampleName.rep2.bam
+cd $resultsDir
+samtools index $sampleName.rep1.bam
+samtools index $sampleName.rep2.bam
+samtools idxstats $sampleName.rep1.bam | cut -f 1,3 | sed -e \'/^\\*\\t/d\' -e \"1 i id\\t$sampleName\" | tr \"\\\\t\" \",\" >$sampleName.rep1.count.csv
+samtools idxstats $sampleName.rep2.bam | cut -f 1,3 | sed -e \'/^\\*\\t/d\' -e \"1 i id\\t$sampleName\" | tr \"\\\\t\" \",\" >$sampleName.rep2.count.csv
+gzip $sampleName.rep1.count.csv
+gzip $sampleName.rep2.count.csv
+mkdir -p $sampleName.log/rep1
+mkdir -p $sampleName.log/rep2
+python /home/solexa/scripts/PhIPseq/calc_zipval.py $sampleName.rep1.count.csv.gz $inputCounts $sampleName.log/rep1 > $sampleName.rep1.zipval.csv
+python /home/solexa/scripts/PhIPseq/calc_zipval.py $sampleName.rep2.count.csv.gz $inputCounts $sampleName.log/rep2 > $sampleName.rep2.zipval.csv
+gzip $sampleName.rep1.zipval.csv
+gzip $sampleName.rep2.zipval.csv
+python /home/solexa/scripts/PhIPseq/call_hits.py $sampleName.rep1.zipval.csv.gz $sampleName.rep2.zipval.csv.gz $sampleName.log $threshold  > $sampleName.zihit.csv
+gzip $sampleName.zihit.csv
+#Caclulate virus scores from hits
+python $scriptsPATH/calc_scores.py $sampleName.zihit.csv.gz $metaData $nhitsBeads $nhitsSamples $groupingLevel $epitopeLength > $sampleName.ziscore.spp.csv
+gzip $sampleName.ziscore.spp.csv",
+file=paste(sbatchPath, sampleSheet$SampleName[i],".sbatch",sep=""),sep="\n", append=TRUE)
+}
+
+
+
+#Combine multiple csvs into one table
+PATH=/home/solexa/apps/samtools/samtools-1.3.1:/home/solexa/apps/anaconda3/bin:$PATH
+scriptsPATH=/home/solexa/scripts/PhIPseq
+runDir=/shared/ngs/illumina/rbasom/2016.10.14.rbender
+resultsDir=$runDir/results
+scoreFiles=`ls *.ziscore.spp.csv.gz`
+#for i in $scoreFiles; do zcat $i >> 2017.01.10.SABES_5.ziscore.spp.csv.gz; done
+
+python $scriptsPATH/concat_tables.py $scoreFiles > 2017.01.10.SABES_5_COMBINED_ziscore.spp.csv
+gzip 2017.01.10.SABES_5_COMBINED_ziscore.spp.csv
+
+hitFiles=`ls *.zihit.csv.gz`
+python $scriptsPATH/concat_tables.py $hitFiles > 2017.01.10.SABES_5_COMBINED_zihit.csv
+gzip 2017.01.10.SABES_5_COMBINED_zihit.csv
+
+
+
+
+
+
+##########################################################################################################################################################################################
+# 2015.11.14
+# vir2.160114.count.csv.gz contains the input counts for the VirScan library.
+# The .fastq.bz2 files are the zipped raw data that we receive directly from the Illumina sequencing facility. The files containing "S196" and "S292" are the duplicates that correspond to sample SABES_2A.A4, while "S197" and "S293" are duplicates that correspond to sample SABES_2A.A5.
+
+module load bowtie/1.1.1
+PATH=/home/solexa/apps/samtools/samtools-1.3.1:/home/solexa/apps/anaconda3/bin:$PATH
+
+bowtieIndex=/shared/solexa/solexa/Genomes/genomes/PhIPseq/vir2/vir2
+scriptsPATH=/home/solexa/scripts/PhIPseq
+runDir=/shared/ngs/illumina/rbasom/2016.10.14.rbender
+fastqDir=$runDir/VirScanPipelineTransfer
+resultsDir=$runDir/results
+mkdir -p $resultsDir
+inputCounts=$fastqDir/vir2.160114.count.csv.gz
+threshold=2.3
+metaData=$runDir/SABES/VIR2.csv.gz
+groupingLevel=Species
+epitopeLength=7
+nhitsBeads=$fastqDir/vir2.nhits.beads.csv.gz
+nhitsSamples=$fastqDir/vir2.nhits.samps.csv.gz
+
+sampleName=SABES_2A.A5
+
+cd $fastqDir
+rep1=LIB022668_GEN00064750_S197_L002_R1.fastq.bz2
+rep2=LIB022668_GEN00064846_S293_L002_R1.fastq.bz2
+
+bzip2 -dc $fastqDir/$rep1 | bowtie -n 3 -l 30 -e 1000 --tryhard --nomaqround --norc --best --sam --quiet $bowtieIndex - | samtools view -u - | samtools sort - > $resultsDir/$sampleName.rep1.bam
+bzip2 -dc $fastqDir/$rep2 | bowtie -n 3 -l 30 -e 1000 --tryhard --nomaqround --norc --best --sam --quiet $bowtieIndex - | samtools view -u - | samtools sort - > $resultsDir/$sampleName.rep2.bam
+
+cd $resultsDir
+samtools index $sampleName.rep1.bam
+samtools index $sampleName.rep2.bam
+#/opt/samtools-1.1/bin/samtool idxstats BAM_OUTPUT_NAME.bam | cut -f 1,3 | sed -e '/^\*\t/d' -e '1 i id\tSAMPLE_ID' | tr "\\t" "," >COUNT_FILE.csv
+samtools idxstats $sampleName.rep1.bam | cut -f 1,3 | sed -e '/^\*\t/d' -e "1 i id\\t$sampleName" | tr "\\t" "," >$sampleName.rep1.count.csv
+samtools idxstats $sampleName.rep2.bam | cut -f 1,3 | sed -e '/^\*\t/d' -e "1 i id\\t$sampleName" | tr "\\t" "," >$sampleName.rep2.count.csv
+gzip $sampleName.rep1.count.csv
+gzip $sampleName.rep2.count.csv
+mkdir -p $sampleName.log/rep1
+mkdir -p $sampleName.log/rep2
+python /home/solexa/scripts/PhIPseq/calc_zipval.py $sampleName.rep1.count.csv.gz $inputCounts $sampleName.log/rep1 > $sampleName.rep1.zipval.csv
+python /home/solexa/scripts/PhIPseq/calc_zipval.py $sampleName.rep2.count.csv.gz $inputCounts $sampleName.log/rep2 > $sampleName.rep2.zipval.csv
+gzip $sampleName.rep1.zipval.csv
+gzip $sampleName.rep2.zipval.csv
+python /home/solexa/scripts/PhIPseq/call_hits.py $sampleName.rep1.zipval.csv.gz $sampleName.rep2.zipval.csv.gz $sampleName.log $threshold  > $sampleName.zihit.csv
+gzip $sampleName.zihit.csv
+#Caclulate virus scores from hits
+python $scriptsPATH/calc_scores.py $sampleName.zihit.csv.gz $metaData $nhitsBeads $nhitsSamples $groupingLevel $epitopeLength > $sampleName.ziscore.spp.csv
+gzip $sampleName.ziscore.spp.csv
+
+
+#####################
+#other sample
+sampleName=SABES_2A.A4
+rep1=LIB022668_GEN00064749_S196_L002_R1.fastq.bz2
+rep2=LIB022668_GEN00064845_S292_L002_R1.fastq.bz2
+#####################
+
+
+#Combine multiple csvs into one table
+python $scriptsPATH/concat_tables.py SABES_2A.A4.ziscore.spp.csv.gz SABES_2A.A5.ziscore.spp.csv.gz > COMBINED_ziscore.spp.csv
+zcat COMBINED_ziscore.spp.csv
