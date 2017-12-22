@@ -48,7 +48,10 @@ proportions = proportions[[c for c in proportions.columns.values if c not in met
 
 #####   Aggregate replicates    #####
 def aggregate(df, reps, name):
-    df[name] = df[reps].mean(axis=1) # mean of each row --> new column of aggregated values
+    if len(reps) == 1:
+        df[name] = df[reps[0]]
+    else:
+        df[name] = df[reps].mean(axis=1) # mean of each row --> new column of aggregated values
     df.drop(reps, inplace=True, axis=1, errors='ignore') # drop original columns (yes, the axis designator switches between these two methods which is incredibly annoying but is correct I promise)
 
 if args.aggregate_technical:
@@ -70,13 +73,11 @@ if args.aggregate_technical:
 
 if args.aggregate_biological:
     assert args.aggregate_technical, 'ERROR: cannot aggregate biological replicates without first aggregating technical replicates'
-    biological_replicates = defaultdict(list)
-    # {'ZIKV': ['NHP-6-2ng', 'NHP-6-10ng', 'NHP-3']}
+    biological_replicates = defaultdict(list) # {'ZIKV': ['NHP-6-2ng', 'NHP-6-10ng', 'NHP-3']}
 
-    for sample, sera in sample_sera_map.items(): # Find replicates like ['NHP-5-2ng', 'NHP-15-10ng']
-        all_sample_reps = [c for c in proportions.columns.values if sample.upper() in c.upper()]
-        biological_replicates[sera] += all_sample_reps
-    biological_replicates['CONTROL'] += ['input', 'beads']
+    for sample, sera in sample_sera_map.items():
+        if sample in proportions.columns.values:
+            biological_replicates[sera].append(sample)
 
     for serum, reps in biological_replicates.items():
         aggregate(proportions, reps, serum)
