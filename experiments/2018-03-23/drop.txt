@@ -1,0 +1,9 @@
+beads-only_1
+J_20ug_1
+J_20ug_2
+J_2ug_1
+J_2ug_2
+S_20ug_1
+S_20ug_2
+S_2ug_1
+S_2ug_2
