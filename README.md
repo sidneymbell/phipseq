@@ -34,7 +34,7 @@ The template analyses can be found in `./scripts/`. Simply duplicate the noteboo
 * A list of samples to drop in `drop.txt`  
     
 This is the first step in the analytical pipeline, intended to sanity-check replicates and controls (and flag any problems along the way). 
-See notebook [here](./scripts/qc.ipynb) for step-by-step explanations.  
+See notebook [here](./scripts/qc-template.ipynb) for step-by-step explanations.  
   
 #### Enrichment scores  
 **Input:** `drop.txt`, `proportions.csv`  
